@@ -17,14 +17,7 @@ print("API Key loaded:", bool(os.getenv("GOOGLE_API_KEY")))
 
 llm = ChatGoogleGenerativeAI(
     model="gemini-3.6-flash",
-    temperature=0
 )
-
-response = llm.invoke("What is RAG in AI?")
-
-print("\nGemini Response:")
-print(response.content)
-
 
 # -------------------------
 # Step 1: Load Documents
@@ -78,32 +71,167 @@ persist_directory = "db"
 vectordb = Chroma.from_documents(
     documents=chunks,
     embedding=embeddings,
-    persist_directory=persist_directory
+    persist_directory=persist_directory,
+    collection_name="articles"
 )
 
 print("Documents stored in ChromaDB!")
 
 
 # -------------------------
-# Step 5: Retriever
+# Step 5: Create Retriever
 # -------------------------
 
 retriever = vectordb.as_retriever(
-    search_kwargs={"k": 3}
+    search_type="similarity",
+    search_kwargs={
+        "k": 10
+    }
 )
+
+
+# -------------------------
+# Step 6: RAG Question Answering
+# -------------------------
 
 question = "How much did Microsoft invest in OpenAI?"
 
+
+# Retrieve more candidates
 docs = retriever.invoke(question)
 
 
 # -------------------------
-# Step 6: Display Results
+# Step 6A: Remove duplicates
 # -------------------------
 
-print("\nRetrieved Documents:")
-print("=" * 60)
+unique_docs = []
+seen = set()
 
-for i, doc in enumerate(docs):
-    print(f"\n--- Result {i + 1} ---")
+for doc in docs:
+
+    content = doc.page_content.strip()
+
+    if content not in seen:
+        seen.add(content)
+        unique_docs.append(doc)
+
+
+# -------------------------
+# Step 6B: Keyword reranking
+# -------------------------
+
+question_words = {
+    word.lower().strip(".,?!")
+    for word in question.split()
+    if len(word) > 2
+}
+
+
+def keyword_score(doc):
+
+    content = doc.page_content.lower()
+
+    score = 0
+
+    for word in question_words:
+
+        if word in content:
+            score += 1
+
+    return score
+
+
+# Sort documents by keyword relevance
+unique_docs = sorted(
+    unique_docs,
+    key=keyword_score,
+    reverse=True
+)
+
+
+# Keep the best documents
+unique_docs = unique_docs[:5]
+
+
+# -------------------------
+# Step 6C: Build Context
+# -------------------------
+
+context = "\n\n--- DOCUMENT ---\n\n".join(
+    doc.page_content
+    for doc in unique_docs
+)
+
+
+# -------------------------
+# Step 7: Create Prompt
+# -------------------------
+
+prompt = f"""
+You are a question-answering assistant.
+
+Answer the user's question using ONLY the information
+contained in the DOCUMENT CONTEXT.
+
+Rules:
+
+1. Use only the provided document context.
+2. Carefully look for the exact answer.
+3. Pay attention to names, numbers, companies,
+   dates and amounts.
+4. Do not confuse different investments or amounts.
+5. Do not use outside knowledge.
+6. Give a short and direct answer.
+7. If the answer truly does not exist in the context,
+   say exactly:
+
+"I don't know based on the provided documents."
+
+DOCUMENT CONTEXT:
+-----------------
+
+{context}
+
+-----------------
+
+USER QUESTION:
+
+{question}
+
+ANSWER:
+"""
+
+
+# -------------------------
+# Step 8: Ask Gemini
+# -------------------------
+
+response = llm.invoke(prompt)
+
+
+# -------------------------
+# Step 9: Display Results
+# -------------------------
+
+print("\n==============================")
+print("QUESTION:")
+print(question)
+
+
+print("\n==============================")
+print("RETRIEVED DOCUMENTS:")
+
+for i, doc in enumerate(unique_docs, start=1):
+
+    print(f"\n--- Result {i} ---")
+
     print(doc.page_content)
+
+    print(f"\nKeyword Score: {keyword_score(doc)}")
+
+
+print("\n==============================")
+print("ANSWER:")
+
+print(response.content)
